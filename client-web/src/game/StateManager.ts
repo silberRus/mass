@@ -9,10 +9,15 @@ export interface Cell {
   x: number;
   y: number;
   radius: number;
-  // Для интерполяции
-  targetX?: number;
+  velocity?: Vector2D; // Для split/eject
+  targetX?: number;    // Куда движется (от сервера)
   targetY?: number;
-  velocity?: Vector2D;
+  
+  // Для плавной интерполяции
+  serverX?: number;    // Последняя позиция от сервера
+  serverY?: number;
+  serverRadius?: number;
+  lerpFactor?: number; // Скорость интерполяции к серверной позиции
 }
 
 export interface Player {
@@ -21,9 +26,7 @@ export interface Player {
   color: string;
   isBot: boolean;
   score: number;
-  cells: Map<string, Cell>; // cellId -> Cell
-  targetX?: number;
-  targetY?: number;
+  cells: Map<string, Cell>;
 }
 
 export interface Food {
@@ -55,11 +58,8 @@ export class GameStateManager {
       case 'player_joined':
         this.handlePlayerJoined(data);
         break;
-      case 'player_moved':
-        this.handlePlayerMoved(data);
-        break;
-      case 'cell_updated':
-        this.handleCellUpdated(data);
+      case 'state_delta':
+        this.handleStateDelta(data);
         break;
       case 'player_split':
         this.handlePlayerSplit(data);
@@ -117,24 +117,31 @@ export class GameStateManager {
     console.log(`[STATE] Player joined: ${player.name} (${player.id})`);
   }
 
-  private handlePlayerMoved(data: any) {
-    const player = this.players.get(data.playerId);
-    if (player) {
-      player.targetX = data.targetX;
-      player.targetY = data.targetY;
-    }
-  }
-
-  private handleCellUpdated(data: any) {
-    // Обновляем позицию и размер клетки
-    const player = this.players.get(data.playerId);
-    if (player) {
-      const cell = player.cells.get(data.cellId);
-      if (cell) {
-        // Плавное обновление позиции (линейная интерполяция)
-        cell.targetX = data.x;
-        cell.targetY = data.y;
-        cell.radius = data.radius;
+  private handleStateDelta(data: any) {
+    // Обновляем позиции клеток из delta (приходит с сервера 10 раз/сек)
+    for (const entityDelta of data.entities) {
+      // Ищем клетку по ID
+      let found = false;
+      for (const player of this.players.values()) {
+        const cell = player.cells.get(entityDelta.id);
+        if (cell) {
+          // Сохраняем серверные позиции отдельно
+          cell.serverX = entityDelta.x;
+          cell.serverY = entityDelta.y;
+          cell.serverRadius = entityDelta.radius;
+          cell.targetX = entityDelta.targetX;
+          cell.targetY = entityDelta.targetY;
+          
+          // Начинаем плавную интерполяцию
+          cell.lerpFactor = 0;
+          
+          found = true;
+          break;
+        }
+      }
+      
+      if (!found) {
+        // Возможно это еда, но мы её не трекаем через delta
       }
     }
   }
@@ -270,16 +277,15 @@ export class GameStateManager {
 
   // Интерполяция позиций (вызывается каждый кадр)
   interpolate(dt: number) {
-    // ЛИНЕЙНАЯ ИНТЕРПОЛЯЦИЯ к cell.targetX/targetY от сервера
-    // Сервер отправляет cell_updated каждые 100ms (10 раз/сек)
-    // Клиент плавно движется к этим позициям
+    // CLIENT-SIDE PREDICTION с SMOOTH RECONCILIATION:
+    // 1. Клиент предсказывает движение через физику
+    // 2. Сервер присылает позицию + target 
+    // 3. Клиент ПЛАВНО корректирует позицию к серверной
     
-    const smoothing = 0.3; // Скорость интерполяции
-    
-    // Интерполируем позиции клеток
+    // Симулируем движение к target
     for (const player of this.players.values()) {
       for (const cell of player.cells.values()) {
-        // Если есть velocity (split/eject) - используем его
+        // Priority 1: Velocity (для split/eject)
         if (cell.velocity) {
           cell.x += cell.velocity.x * dt;
           cell.y += cell.velocity.y * dt;
@@ -291,14 +297,59 @@ export class GameStateManager {
             cell.velocity = undefined;
           }
         }
-        // Иначе - интерполируем к целевой позиции от сервера
+        // Priority 2: Предсказание движения через физику
         else if (cell.targetX !== undefined && cell.targetY !== undefined) {
           const dx = cell.targetX - cell.x;
           const dy = cell.targetY - cell.y;
+          const distance = Math.sqrt(dx * dx + dy * dy);
           
-          // Плавное движение к цели
-          cell.x += dx * smoothing;
-          cell.y += dy * smoothing;
+          if (distance > 1) {
+            const ndx = dx / distance;
+            const ndy = dy / distance;
+            
+            // ТА ЖЕ формула скорости что на сервере!
+            const mass = (cell.radius * cell.radius) / 100;
+            const speed = 600 / Math.pow(mass, 0.3);
+            
+            // Движение
+            cell.x += ndx * speed * dt;
+            cell.y += ndy * speed * dt;
+            
+            // Границы мира
+            cell.x = Math.max(cell.radius, Math.min(5000 - cell.radius, cell.x));
+            cell.y = Math.max(cell.radius, Math.min(5000 - cell.radius, cell.y));
+          }
+        }
+        
+        // Priority 3: Плавная коррекция к серверной позиции
+        if (cell.serverX !== undefined && cell.serverY !== undefined) {
+          // Постепенно увеличиваем лерп фактор
+          if (cell.lerpFactor !== undefined) {
+            cell.lerpFactor = Math.min(1, cell.lerpFactor + dt * 5); // 5 = скорость коррекции
+          } else {
+            cell.lerpFactor = 0;
+          }
+          
+          // Рассчитываем разницу между предсказанной и серверной позицией
+          const errorX = cell.serverX - cell.x;
+          const errorY = cell.serverY - cell.y;
+          const errorDist = Math.sqrt(errorX * errorX + errorY * errorY);
+          
+          // Если рассинхронизация большая, корректируем быстрее
+          const correctionSpeed = errorDist > 50 ? 8 : 3;
+          const lerpSpeed = dt * correctionSpeed;
+          
+          // Плавная коррекция позиции
+          if (errorDist > 1) {
+            cell.x += errorX * lerpSpeed;
+            cell.y += errorY * lerpSpeed;
+          }
+          
+          // Плавная коррекция радиуса
+          if (cell.serverRadius !== undefined) {
+            const radiusError = cell.serverRadius - cell.radius;
+            cell.radius += radiusError * lerpSpeed;
+          }
         }
       }
     }

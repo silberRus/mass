@@ -13,15 +13,28 @@ type World struct {
 	Food     map[string]*Food
 	Mu       sync.RWMutex
 	rand     *rand.Rand
-	EventBus *events.EventBus // Event Bus для публикации событий
+	EventBus *events.EventBus
+	
+	// Для delta tracking
+	CurrentTick   int64
+	entityStates  map[string]*EntityState // Последнее отправленное состояние
+}
+
+// EntityState - последнее известное состояние entity
+type EntityState struct {
+	LastX      float64
+	LastY      float64
+	LastRadius float64
 }
 
 func NewWorld() *World {
 	w := &World{
-		Players:  make(map[string]*Player),
-		Food:     make(map[string]*Food),
-		rand:     rand.New(rand.NewSource(time.Now().UnixNano())),
-		EventBus: events.NewEventBus(),
+		Players:      make(map[string]*Player),
+		Food:         make(map[string]*Food),
+		rand:         rand.New(rand.NewSource(time.Now().UnixNano())),
+		EventBus:     events.NewEventBus(),
+		CurrentTick:  0,
+		entityStates: make(map[string]*EntityState),
 	}
 	
 	// Инициализируем еду
@@ -102,6 +115,7 @@ func (w *World) Update(dt float64) {
 
 // UpdateUnlocked - обновление без лока (для вызова когда лок уже есть)
 func (w *World) UpdateUnlocked(dt float64) {
+	w.CurrentTick++
 	
 	// Обновляем движение всех клеток
 	for _, player := range w.Players {
@@ -126,9 +140,10 @@ func (w *World) UpdateUnlocked(dt float64) {
 	// Пополняем еду
 	w.maintainFood()
 	
-	// ВАЖНО: Публикуем обновления позиций клеток каждые 3 тика (10 раз в секунду)
-	// Это дает плавное движение без избыточного трафика
-	w.publishCellUpdates()
+	// ВАЖНО: Публикуем state delta каждые 3 тика (10 раз/сек)
+	if w.CurrentTick%3 == 0 {
+		w.publishStateDelta()
+	}
 }
 
 func (w *World) updatePlayerMovement(player *Player, dt float64) {
@@ -558,30 +573,92 @@ func randomFoodColor(r *rand.Rand) string {
 	return colors[r.Intn(len(colors))]
 }
 
-// publishCellUpdates - публикует обновления позиций клеток (вызывается каждый тик)
-var cellUpdateCounter = 0
-
-func (w *World) publishCellUpdates() {
-	cellUpdateCounter++
+// publishStateDelta - публикует только изменившиеся entity
+func (w *World) publishStateDelta() {
+	const POSITION_THRESHOLD = 5.0  // Игнорируем изменения < 5 пикселей
+	const RADIUS_THRESHOLD = 0.5    // Игнорируем изменения радиуса < 0.5
 	
-	// Отправляем обновления каждые 3 тика (10 раз в секунду)
-	if cellUpdateCounter < 3 {
-		return
-	}
-	cellUpdateCounter = 0
+	deltas := []events.EntityDelta{}
 	
-	// Собираем все обновления
+	// Проверяем все клетки игроков
 	for _, player := range w.Players {
 		player.Mu.RLock()
+		
+		// Получаем target игрока
+		targetX := player.TargetPos.X
+		targetY := player.TargetPos.Y
+		
 		for _, cell := range player.Cells {
-			w.EventBus.PublishEvent(events.EventCellUpdated, &events.CellUpdatedEvent{
-				CellID:   cell.ID,
-				PlayerID: player.ID,
-				X:        cell.Position.X,
-				Y:        cell.Position.Y,
-				Radius:   cell.Radius,
-			})
+			lastState := w.entityStates[cell.ID]
+			if lastState == nil {
+				// Новая клетка - создаем state
+				lastState = &EntityState{
+					LastX:      cell.Position.X,
+					LastY:      cell.Position.Y,
+					LastRadius: cell.Radius,
+				}
+				w.entityStates[cell.ID] = lastState
+				// Новые entity всегда отправляем
+				deltas = append(deltas, events.EntityDelta{
+					ID:      cell.ID,
+					X:       cell.Position.X,
+					Y:       cell.Position.Y,
+					Radius:  cell.Radius,
+					TargetX: targetX,
+					TargetY: targetY,
+				})
+				continue
+			}
+			
+			// Проверяем изменения
+			dx := math.Abs(cell.Position.X - lastState.LastX)
+			dy := math.Abs(cell.Position.Y - lastState.LastY)
+			dr := math.Abs(cell.Radius - lastState.LastRadius)
+			
+			if dx > POSITION_THRESHOLD || dy > POSITION_THRESHOLD || dr > RADIUS_THRESHOLD {
+				deltas = append(deltas, events.EntityDelta{
+					ID:      cell.ID,
+					X:       cell.Position.X,
+					Y:       cell.Position.Y,
+					Radius:  cell.Radius,
+					TargetX: targetX,
+					TargetY: targetY,
+				})
+				
+				// Обновляем last state
+				lastState.LastX = cell.Position.X
+				lastState.LastY = cell.Position.Y
+				lastState.LastRadius = cell.Radius
+			}
 		}
 		player.Mu.RUnlock()
+	}
+	
+	// Публикуем delta если есть изменения
+	if len(deltas) > 0 {
+		w.EventBus.PublishEvent(events.EventStateDelta, &events.StateDeltaEvent{
+			Tick:      w.CurrentTick,
+			Timestamp: time.Now().UnixMilli(),
+			Entities:  deltas,
+		})
+	}
+	
+	// Очистка: удаляем states для несуществующих клеток
+	for cellID := range w.entityStates {
+		exists := false
+		for _, player := range w.Players {
+			for _, cell := range player.Cells {
+				if cell.ID == cellID {
+					exists = true
+					break
+				}
+			}
+			if exists {
+				break
+			}
+		}
+		if !exists {
+			delete(w.entityStates, cellID)
+		}
 	}
 }

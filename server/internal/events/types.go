@@ -8,23 +8,20 @@ type EventType string
 const (
 	// События игроков
 	EventPlayerJoined  EventType = "player_joined"
-	EventPlayerMoved   EventType = "player_moved"
 	EventPlayerSplit   EventType = "player_split"
 	EventPlayerEjected EventType = "player_ejected"
 	EventPlayerDied    EventType = "player_died"
 	
 	// События клеток
-	EventCellCreated EventType = "cell_created"
-	EventCellUpdated EventType = "cell_updated" // НОВОЕ: обновление позиции клетки
 	EventCellMerged  EventType = "cell_merged"
 	EventCellEaten   EventType = "cell_eaten"
 	
 	// События еды
 	EventFoodSpawned EventType = "food_spawned"
 	EventFoodEaten   EventType = "food_eaten"
-	EventFoodEjected EventType = "food_ejected"
 	
-	// Системные события
+	// State updates
+	EventStateDelta    EventType = "state_delta" // НОВОЕ: delta updates
 	EventWorldSnapshot EventType = "world_snapshot"
 )
 
@@ -47,20 +44,21 @@ type PlayerJoinedEvent struct {
 	Radius   float64 `json:"radius"`
 }
 
-// PlayerMovedEvent - игрок изменил позицию
-type PlayerMovedEvent struct {
-	PlayerID  string  `json:"playerId"`
-	TargetX   float64 `json:"targetX"`
-	TargetY   float64 `json:"targetY"`
+// EntityDelta - изменение entity (клетки или еды)
+type EntityDelta struct {
+	ID      string  `json:"id"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Radius  float64 `json:"radius"`
+	TargetX float64 `json:"targetX"` // Куда движется клетка
+	TargetY float64 `json:"targetY"`
 }
 
-// CellUpdatedEvent - обновление позиции и размера клетки
-type CellUpdatedEvent struct {
-	CellID   string  `json:"cellId"`
-	PlayerID string  `json:"playerId"`
-	X        float64 `json:"x"`
-	Y        float64 `json:"y"`
-	Radius   float64 `json:"radius"`
+// StateDeltaEvent - delta update (только изменения)
+type StateDeltaEvent struct {
+	Tick      int64          `json:"tick"`
+	Timestamp int64          `json:"timestamp"`
+	Entities  []EntityDelta  `json:"entities"`
 }
 
 // PlayerSplitEvent - игрок разделился

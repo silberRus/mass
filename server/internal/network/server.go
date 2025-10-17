@@ -323,13 +323,7 @@ func (s *Server) processMove(cmd *PlayerCommand) {
 	}
 
 	player.SetTarget(x, y)
-	
-	// Публикуем событие движения
-	s.World.EventBus.PublishEvent(events.EventPlayerMoved, &events.PlayerMovedEvent{
-		PlayerID: player.ID,
-		TargetX:  x,
-		TargetY:  y,
-	})
+	// Позиции обновляются через state delta
 }
 
 func (s *Server) processSplit(cmd *PlayerCommand) {

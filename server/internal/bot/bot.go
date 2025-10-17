@@ -1,7 +1,6 @@
 package bot
 
 import (
-	"agario-server/internal/events"
 	"agario-server/internal/game"
 	"math"
 	"math/rand"
@@ -78,16 +77,8 @@ func (b *Bot) Update() {
 	if target != nil {
 		b.Player.SetTarget(target.X, target.Y)
 		
-		// Публикуем событие движения для бота
-		b.World.EventBus.PublishEvent(events.EventPlayerMoved, &events.PlayerMovedEvent{
-			PlayerID: b.Player.ID,
-			TargetX:  target.X,
-			TargetY:  target.Y,
-		})
-		
 		// Иногда пытаемся разделиться если противник близко
 		if b.shouldSplit(center, *target) {
-			// Вызываем SplitPlayerUnlocked БЕЗ лока (он уже есть в главном цикле)
 			b.World.SplitPlayerUnlocked(b.Player)
 		}
 	} else {
@@ -213,13 +204,7 @@ func (b *Bot) wanderRandomly(center game.Vector2D) {
 	targetY = math.Max(50, math.Min(game.WorldHeight-50, targetY))
 	
 	b.Player.SetTarget(targetX, targetY)
-	
-	// Публикуем событие движения
-	b.World.EventBus.PublishEvent(events.EventPlayerMoved, &events.PlayerMovedEvent{
-		PlayerID: b.Player.ID,
-		TargetX:  targetX,
-		TargetY:  targetY,
-	})
+	// Позиция обновляется через state delta, события не нужны
 }
 
 func randomColor() string {
